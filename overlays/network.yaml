@@ -1,0 +1,52 @@
+# Overlay: wire prospero ↔ caliban over TCP + TLS + bearer token instead of the
+# shared Unix control socket.
+#
+#   ⚠️  BETA — caliband network mode is newly landed and still hardening
+#   (caliban #319, #320; gRPC migration #314). Prefer the base socket wiring for
+#   production until those close.
+#
+#   Setup:
+#     ./scripts/gen-certs.sh                 # writes ./certs (CA + server cert, SAN=caliban)
+#     openssl rand -hex 32                    # put result in .env as CALIBAN_DAEMON_TOKEN
+#     docker compose -f compose.yaml -f overlays/network.yaml up -d
+#
+# This overlay configures the caliban SERVER side declaratively (listen + TLS +
+# token). prospero dials caliband per-repo, and that endpoint (host caliban:8443,
+# the bearer token, and the CA at /certs/ca.pem) is supplied when you REGISTER
+# the repo through prospero's API/dashboard at runtime — see README "network
+# overlay". The CA + token are mounted/passed into prospero so they're available
+# at registration time.
+
+services:
+  caliban:
+    command:
+      - "--workspace-root"
+      - "/workspace"
+      - "--listen"
+      - "0.0.0.0:${CALIBAN_DAEMON_PORT:-8443}"
+      - "--advertise-host"
+      - "caliban"
+    environment:
+      CALIBAN_DAEMON_TOKEN: ${CALIBAN_DAEMON_TOKEN:?set CALIBAN_DAEMON_TOKEN in .env (openssl rand -hex 32)}
+      CALIBAN_DAEMON_TLS_CERT: /certs/caliband.crt
+      CALIBAN_DAEMON_TLS_KEY: /certs/caliband.key
+    volumes:
+      - ./certs:/certs:ro
+    expose:
+      - "${CALIBAN_DAEMON_PORT:-8443}"
+    # TCP mode doesn't bind the Unix socket the base healthcheck looks for, and
+    # the slim image has no TCP probe tool — so drop the healthcheck here.
+    healthcheck:
+      disable: true
+
+  prospero:
+    environment:
+      # Available to reference when registering the repo's caliband endpoint.
+      CALIBAN_DAEMON_TOKEN: ${CALIBAN_DAEMON_TOKEN:?set CALIBAN_DAEMON_TOKEN in .env}
+    volumes:
+      # CA so prospero can verify caliband's server cert at dial time.
+      - ./certs/ca.crt:/certs/ca.crt:ro
+    depends_on:
+      # No socket healthcheck in network mode — gate on start, not health.
+      caliban:
+        condition: service_started

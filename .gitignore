@@ -1,0 +1,17 @@
+# Local environment — copy .env.example → .env and fill in
+.env
+
+# Operator secrets — keep the dir + docs, ignore the real material
+/secrets/*
+!/secrets/.gitkeep
+!/secrets/README.md
+
+# Generated TLS material (network overlay)
+/certs/
+
+# Local bind-mounted workspace + any local state
+/workspace/
+/data/
+
+# OS / editor cruft
+.DS_Store

@@ -1,0 +1,106 @@
+# caliban-ai suite — self-host base stack.
+#
+#   Full suite, safe defaults:
+#     - prospero dashboard published on :${PROSPERO_HTTP_PORT} (default 7878)
+#     - SQLite persistence
+#     - prospero ↔ caliban wired over a shared Unix control socket
+#     - no TLS, no reverse proxy
+#
+#   Quick start:
+#     cp .env.example .env      # then set ANTHROPIC_API_KEY
+#     mkdir -p workspace        # the repo/workspace caliban supervises
+#     docker compose up -d
+#     open http://localhost:7878
+#
+#   Overlays (stack additional -f files):
+#     network.yaml   prospero↔caliban over TCP+TLS+token   (BETA)
+#     postgres.yaml  prospero on Postgres instead of SQLite
+#     proxy.yaml     Caddy HTTPS edge in front of the dashboard
+#     secrets.yaml   docker secrets for credentials instead of .env
+#
+# Run a subset by naming services, e.g.:  docker compose up gonzalo caliban
+
+services:
+  # ── gonzalo ── persistence / code-graph MCP server ──────────────────────────
+  gonzalo:
+    image: ghcr.io/caliban-ai/gonzalo:${GONZALO_VERSION:?set GONZALO_VERSION in .env}
+    restart: unless-stopped
+    environment:
+      GONZALO_HTTP_ADDR: 0.0.0.0:8080
+      GONZALO_GRPC_ADDR: 0.0.0.0:50051
+      GONZALO_ROOT: /data
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - gonzalo-data:/data
+    # Internal-only by default: reachable on the compose network as
+    # http://gonzalo:8080 (HTTP/MCP) and gonzalo:50051 (gRPC). Reference it from
+    # your workspace's .mcp.json to give caliban the code-graph tools.
+    expose:
+      - "8080"
+      - "50051"
+    # No in-image HTTP client (slim base has no curl/wget), so no container
+    # healthcheck. gonzalo exposes /healthz + /readyz on :8080 for an external
+    # probe (e.g. the reverse-proxy overlay or your monitoring).
+
+  # ── caliban ── per-workspace agent supervisor (caliband) ────────────────────
+  caliban:
+    image: ghcr.io/caliban-ai/caliban:${CALIBAN_VERSION:?set CALIBAN_VERSION in .env}
+    restart: unless-stopped
+    # caliband is per-workspace; it derives its control socket name from the
+    # --workspace-root path. prospero must see the SAME canonical path, so the
+    # workspace is mounted at /workspace in both containers.
+    command: ["--workspace-root", "/workspace"]
+    environment:
+      CALIBAN_DAEMON_RUNTIME_DIR: /run/caliban
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Passed-through provider env (unset ⇒ ignored).
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-}
+      CALIBAN_LIVE_BEDROCK: ${CALIBAN_LIVE_BEDROCK:-}
+      CALIBAN_LIVE_VERTEX: ${CALIBAN_LIVE_VERTEX:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ${CALIBAN_WORKSPACE:-./workspace}:/workspace
+      - caliban-runtime:/run/caliban   # shared control-socket dir (see prospero)
+    depends_on:
+      - gonzalo
+    healthcheck:
+      # Ready once the daemon has bound its control socket in the runtime dir.
+      test: ["CMD-SHELL", "ls /run/caliban/*.sock >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── prospero ── fleet dashboard / control plane (prosperod) ─────────────────
+  prospero:
+    image: ghcr.io/caliban-ai/prospero:${PROSPERO_VERSION:?set PROSPERO_VERSION in .env}
+    restart: unless-stopped
+    command: ["--no-autostart"]   # caliban runs as its own service above
+    environment:
+      PROSPERO_ADDR: 0.0.0.0:7878
+      PROSPERO_DATA_DIR: /data
+      PROSPERO_FLEET: local
+      PROSPERO_HOST: ${PROSPERO_HOST:-local}
+      # Discover caliban's control socket in the shared runtime dir.
+      CALIBAN_DAEMON_RUNTIME_DIR: /run/caliban
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "${PROSPERO_HTTP_PORT:-7878}:7878"
+    volumes:
+      - prospero-data:/data
+      - caliban-runtime:/run/caliban       # same socket dir as caliban
+      # prospero canonicalizes the repo root before hashing the socket name, so
+      # /workspace must resolve identically here. Read-only is enough.
+      - ${CALIBAN_WORKSPACE:-./workspace}:/workspace:ro
+    depends_on:
+      # caliban's healthcheck goes green once its control socket is bound, so
+      # prospero starts only after there's a daemon to discover.
+      caliban:
+        condition: service_healthy
+
+volumes:
+  gonzalo-data:
+  prospero-data:
+  caliban-runtime:

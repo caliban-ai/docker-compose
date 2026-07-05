@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare env + fixtures
+        run: |
+          cp .env.example .env
+          # Fill values that overlays require (:? guards) so config can render.
+          sed -i 's/^CALIBAN_DAEMON_TOKEN=.*/CALIBAN_DAEMON_TOKEN=ci-dummy-token/' .env
+          mkdir -p workspace
+          # secrets overlay references a real file at config time.
+          printf '%s' 'ci-dummy-key' > secrets/anthropic_api_key
+
+      - name: Validate base + every overlay combination
+        run: |
+          set -euo pipefail
+          combos=(
+            "compose.yaml"
+            "compose.yaml -f overlays/network.yaml"
+            "compose.yaml -f overlays/postgres.yaml"
+            "compose.yaml -f overlays/proxy.yaml"
+            "compose.yaml -f overlays/secrets.yaml"
+            "compose.yaml -f overlays/postgres.yaml -f overlays/proxy.yaml"
+            "compose.yaml -f overlays/postgres.yaml -f overlays/secrets.yaml"
+          )
+          for c in "${combos[@]}"; do
+            echo "::group::docker compose -f $c config"
+            docker compose -f $c config -q
+            echo "::endgroup::"
+          done
+          echo "all combinations valid"
+
+      - name: Lint shell scripts
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh

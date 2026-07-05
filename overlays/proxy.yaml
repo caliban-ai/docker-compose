@@ -1,0 +1,32 @@
+# Overlay: put a Caddy HTTPS edge in front of the prospero dashboard.
+#
+#   docker compose -f compose.yaml -f overlays/proxy.yaml up -d
+#
+# Caddy terminates TLS on :443 for ${DOMAIN} and reverse-proxies to prospero.
+# The dashboard's raw :7878 host port is unpublished (reached only via Caddy).
+# Set DOMAIN in .env to a real DNS name for public deployments; a *.localhost
+# name gets a locally-trusted internal cert for testing.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - prospero
+
+  prospero:
+    # Reached only through Caddy now — drop the direct host port publish.
+    ports: !override []
+
+volumes:
+  caddy-data:
+  caddy-config:

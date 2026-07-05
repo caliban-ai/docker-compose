@@ -1,0 +1,18 @@
+# Caddy config for the proxy overlay.
+# {$DOMAIN} is taken from the environment (set via .env).
+#
+# Auto-HTTPS: for a public DNS name Caddy provisions a Let's Encrypt cert; for a
+# *.localhost name it uses its locally-trusted internal CA.
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# prospero serves the dashboard, REST API, and SSE stream — reverse_proxy
+	# streams responses, so Server-Sent Events pass through unbuffered.
+	reverse_proxy prospero:7878
+
+	log {
+		output stdout
+		format console
+	}
+}

@@ -1,0 +1,36 @@
+# Overlay: run prospero against Postgres instead of the default SQLite.
+#
+#   docker compose -f compose.yaml -f overlays/postgres.yaml up -d
+#
+# Setting PROSPERO_DATABASE_URL switches prospero into clustered mode; schema is
+# created in-process on boot. Postgres creds come from .env (POSTGRES_*).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-prospero}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  prospero:
+    environment:
+      PROSPERO_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      PROSPERO_REPLICA_ID: ${PROSPERO_REPLICA_ID:-prospero-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

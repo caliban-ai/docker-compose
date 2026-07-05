@@ -108,21 +108,39 @@ wiring, no TLS.
 
 - **caliban**
   - `image: ghcr.io/caliban-ai/caliban:${CALIBAN_VERSION}`
-  - Runs `caliband` as a foreground daemon (exact run subcommand/args to be
-    confirmed during implementation — base image `CMD` is `--help`).
-  - `environment`: `ANTHROPIC_API_KEY` (from `.env`); MCP configured to reach
-    gonzalo at `gonzalo:8080`; `CALIBAN_DAEMON_RUNTIME_DIR=/run/caliban`.
-  - `volumes: [caliban-runtime:/run/caliban]` — the shared runtime dir.
+  - Runs `caliband --workspace-root /workspace` (confirmed from
+    `caliband.rs`: `--workspace-root` is required; base image `CMD` is `--help`,
+    so `command:` supplies the real invocation).
+  - `environment`: `ANTHROPIC_API_KEY` (from `.env`, empty default) + passthrough
+    provider vars; `CALIBAN_DAEMON_RUNTIME_DIR=/run/caliban`.
+  - `volumes`: the shared workspace `${CALIBAN_WORKSPACE:-./workspace}:/workspace`
+    and the shared runtime dir `caliban-runtime:/run/caliban`.
   - `depends_on: [gonzalo]`.
+  - `healthcheck`: `ls /run/caliban/*.sock` — green once the control socket is
+    bound (the slim image has no HTTP client, so HTTP probes aren't possible).
 
 - **prospero**
   - `image: ghcr.io/caliban-ai/prospero:${PROSPERO_VERSION}`
+  - `command: ["--no-autostart"]` — caliban runs as its own service; prospero
+    must not try to spawn caliband (its image has no caliband binary).
   - `ports: ["${PROSPERO_HTTP_PORT:-7878}:7878"]`
-  - `volumes: [prospero-data:/data, caliban-runtime:/run/caliban]`
-  - `environment`: `PROSPERO_ADDR=0.0.0.0:7878`,
-    `PROSPERO_DATABASE_URL=sqlite:///data/prospero.db`, `PROSPERO_FLEET=local`,
-    `CALIBAN_DAEMON_RUNTIME_DIR=/run/caliban`.
-  - `depends_on: [caliban]`.
+  - `volumes`: `prospero-data:/data`, `caliban-runtime:/run/caliban`, and the
+    **same workspace mounted at the same path** `…:/workspace:ro`.
+  - `environment`: `PROSPERO_ADDR=0.0.0.0:7878`, `PROSPERO_DATA_DIR=/data`,
+    `PROSPERO_FLEET=local`, `CALIBAN_DAEMON_RUNTIME_DIR=/run/caliban`.
+  - `depends_on: {caliban: {condition: service_healthy}}` — starts only after
+    caliban's socket exists.
+
+### Workspace-mount requirement (discovered during implementation)
+
+caliband is **per-workspace**: its control-socket name is
+`hash16(canonical --workspace-root)`, and prospero **canonicalizes** the repo
+root before hashing to discover the socket. So both containers must see the
+workspace at the **same canonical path** (`/workspace`). The base stack therefore
+mounts `CALIBAN_WORKSPACE` (host, default `./workspace`) into both caliban and
+prospero at `/workspace`, and shares the `caliban-runtime` volume that holds the
+socket. gonzalo is offered to the workspace via `.mcp.json` (`http://gonzalo:8080`)
+rather than auto-wired.
 
 ### Named volumes
 `gonzalo-data`, `prospero-data`, `caliban-runtime` (the last shared between
@@ -201,18 +219,23 @@ base.
   caliban image and a real API key. Deferred to a follow-up once the caliban
   image is published.
 
-## Risks & open items (resolved during implementation planning)
+## Risks & open items
 
 1. **caliban image not published** — upstream hard prerequisite; no build
-   fallback in this repo (by decision). README states it plainly.
-2. **caliband daemon run command** — base image `CMD` is `--help`; the actual
-   foreground-daemon invocation must be confirmed from
-   `caliban/crates/caliban-supervisor/src/bin/caliband.rs`.
-3. **prospero TCP dial config** — the precise env/discovery surface for the
-   network overlay must be confirmed from prospero `fleet.rs`/`client.rs`; ties
-   to #72. Overlay ships marked beta.
-4. **caliban secrets mechanism** — confirm `*_FILE` vs API-key-helper before
-   finalizing `secrets.yaml`.
+   fallback in this repo (by decision). README + preflight state it plainly.
+   *Still open (upstream).*
+2. **caliband daemon run command** — *resolved:* `caliband --workspace-root
+   /workspace` (from `caliband.rs`).
+3. **prospero TCP dial config** — the network overlay configures caliban's TLS
+   server declaratively; prospero dials **per-repo at registration time**
+   (endpoint + token + CA), which is a runtime step, not compose env. Documented
+   as such and marked beta (ties to prospero #72). *Partially open upstream.*
+4. **caliban secrets mechanism** — *resolved:* no native `*_FILE`; `secrets.yaml`
+   uses an entrypoint wrapper that exports each mounted secret as its uppercased
+   env var, then `exec caliband "$@"`.
+5. **In-container healthchecks** — *resolved:* slim images ship no curl/wget, so
+   only caliban gets a healthcheck (socket-file test); gonzalo/prospero rely on
+   `restart` + their `/healthz` endpoints for external probes.
 
 ## Out of scope (v1)
 
