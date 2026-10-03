@@ -25,6 +25,15 @@ services:
       start_period: 10s
 
   prospero:
+    # Clustered + tokens requires an explicit session-cookie key so replicas
+    # sign the same cookies; standalone would generate one per process.
+    # scripts/gen-prospero-auth.sh writes it alongside the tokens file.
+    command:
+      - "--no-autostart"
+      - "--api-tokens-file"
+      - "/run/prospero/auth/tokens"
+      - "--session-key-file"
+      - "/run/prospero/auth/session.key"
     environment:
       PROSPERO_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       PROSPERO_REPLICA_ID: ${PROSPERO_REPLICA_ID:-prospero-1}
