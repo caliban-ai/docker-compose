@@ -1,0 +1,23 @@
+# Overlay: serve prospero's API with NO authentication.
+#
+#   docker compose -f compose.yaml -f overlays/no-auth.yaml up -d
+#
+# Stack this LAST. It replaces prospero's command wholesale, dropping
+# --api-tokens-file (prosperod refuses --insecure-no-auth together with a tokens
+# file) — so an overlay listed after this one that also sets `command:` would win.
+#
+#   ⚠ Anyone who can reach the published port controls the fleet: spawning
+#   agents, killing them, and reading every agent's output. Use this only on a
+#   host where that port is not reachable from anywhere you do not trust, and
+#   prefer the default token path. prosperod logs the unauthenticated mode loudly
+#   on every start.
+#
+# With the postgres overlay, order matters:
+#   -f compose.yaml -f overlays/postgres.yaml -f overlays/no-auth.yaml
+# No tokens means no session-cookie signing, so no session key is needed.
+
+services:
+  prospero:
+    command:
+      - "--no-autostart"
+      - "--insecure-no-auth"

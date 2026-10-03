@@ -1,10 +1,14 @@
 # Local environment — copy .env.example → .env and fill in
 .env
 
-# Operator secrets — keep the dir + docs, ignore the real material
+# Operator secrets — keep the dirs + docs, ignore the real material
 /secrets/*
 !/secrets/.gitkeep
 !/secrets/README.md
+# prospero auth: the mount point is committed, its contents are not
+!/secrets/prospero/
+/secrets/prospero/*
+!/secrets/prospero/.gitkeep
 
 # Generated TLS material (network overlay)
 /certs/
