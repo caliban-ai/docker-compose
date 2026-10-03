@@ -12,8 +12,12 @@
 #     docker compose up -d
 #     open http://localhost:7878
 #
+#   NOTE: the image pins in .env.example are stale and CALIBAN_VERSION=0.4.0 is
+#   not a published tag, so `up` fails at the pull until they are revised as a
+#   cohort. See the README's version warning.
+#
 #   Overlays (stack additional -f files):
-#     network.yaml   prospero↔caliban over TCP+TLS+token   (BETA)
+#     network.yaml   prospero↔caliban over TCP+TLS+token
 #     postgres.yaml  prospero on Postgres instead of SQLite
 #     proxy.yaml     Caddy HTTPS edge in front of the dashboard
 #     secrets.yaml   docker secrets for credentials instead of .env

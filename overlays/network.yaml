@@ -1,9 +1,11 @@
 # Overlay: wire prospero ↔ caliban over TCP + TLS + bearer token instead of the
 # shared Unix control socket.
 #
-#   ⚠️  BETA — caliband network mode is newly landed and still hardening
-#   (caliban #319, #320; gRPC migration #314). Prefer the base socket wiring for
-#   production until those close.
+#   caliband's network mode has been hardened: caliban #319 (accept timeout,
+#   worker status under TLS, advertise-host) and #320 (pinned crypto provider,
+#   negative-path TLS tests) are CLOSED. Still worth knowing: caliban #314 will
+#   migrate this transport from NDJSON over TCP+TLS to native gRPC, which changes
+#   the wire. The base Unix-socket wiring remains the simpler default.
 #
 #   Setup:
 #     ./scripts/gen-certs.sh                 # writes ./certs (CA + server cert, SAN=caliban)
@@ -11,11 +13,11 @@
 #     docker compose -f compose.yaml -f overlays/network.yaml up -d
 #
 # This overlay configures the caliban SERVER side declaratively (listen + TLS +
-# token). prospero dials caliband per-repo, and that endpoint (host caliban:8443,
-# the bearer token, and the CA at /certs/ca.pem) is supplied when you REGISTER
-# the repo through prospero's API/dashboard at runtime — see README "network
-# overlay". The CA + token are mounted/passed into prospero so they're available
-# at registration time.
+# token). prospero dials caliband per WORKSPACE (prospero #72), and that endpoint
+# (host caliban:8443, the bearer token, and the CA at /certs/ca.crt — the path the
+# volume below mounts it at) is supplied when you REGISTER it through prospero's
+# API/dashboard at runtime — see README "network overlay". The CA + token are
+# mounted/passed into prospero so they're available at registration time.
 
 services:
   caliban:

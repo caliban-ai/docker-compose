@@ -7,8 +7,6 @@
 #
 # The server cert's SAN is the compose service name `caliban`, which is how
 # prospero reaches it on the compose network. Re-run to rotate.
-#
-# BETA: caliband network mode is still hardening (caliban #319/#320).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
