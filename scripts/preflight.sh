@@ -40,8 +40,24 @@ echo "==> workspace"
 WS="${CALIBAN_WORKSPACE:-./workspace}"
 if [ -d "$WS" ]; then ok "workspace dir $WS exists"; else warn "workspace dir $WS missing — run: mkdir -p ${WS#./}"; fi
 
-echo "==> caliban image"
-warn "ghcr.io/caliban-ai/caliban must be published before the caliban service can pull (upstream prerequisite)"
+echo "==> image pins"
+# All three images ARE published on GHCR. The shipped pins, however, are stale,
+# and caliban 0.4.0 was never published at all — catch that before the pull does.
+case "${CALIBAN_VERSION:-}" in
+  0.4.0|0.4.0@*)
+    err "CALIBAN_VERSION=$CALIBAN_VERSION is not a published tag (oldest is 0.5.0, latest 0.15.0) — the pull will fail"
+    ;;
+  0.[0-9].*|0.1[0-4].*)
+    warn "CALIBAN_VERSION=$CALIBAN_VERSION is behind the latest published caliban (0.15.0)"
+    ;;
+esac
+case "${GONZALO_VERSION:-}" in
+  0.[0-6].*) warn "GONZALO_VERSION=$GONZALO_VERSION is behind the latest published gonzalo (0.7.0)" ;;
+esac
+case "${PROSPERO_VERSION:-}" in
+  0.[0-7].*) warn "PROSPERO_VERSION=$PROSPERO_VERSION is behind the latest published prospero (0.8.1); note 0.8.0+ needs an API-auth decision" ;;
+esac
+warn "the pins move as a cohort — see the README version warning before bumping one"
 
 echo
 if [ "$fail" -eq 0 ]; then echo "preflight: no blocking issues"; else echo "preflight: blocking issues above"; fi
