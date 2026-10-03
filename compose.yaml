@@ -12,23 +12,63 @@
 #     docker compose up -d
 #     open http://localhost:7878
 #
-#   NOTE: the image pins in .env.example are stale and CALIBAN_VERSION=0.4.0 is
-#   not a published tag, so `up` fails at the pull until they are revised as a
-#   cohort. See the README's version warning.
+#   prosperod authenticates its API (>= 0.8.0). The base stack runs WITH tokens:
+#   generate them once before the first `up`:
+#
+#     scripts/gen-prospero-auth.sh
+#
+#   which writes secrets/prospero/tokens and prints the token to sign in with.
+#   To run unauthenticated instead, stack overlays/no-auth.yaml LAST.
 #
 #   Overlays (stack additional -f files):
 #     network.yaml   prospero↔caliban over TCP+TLS+token
 #     postgres.yaml  prospero on Postgres instead of SQLite
 #     proxy.yaml     Caddy HTTPS edge in front of the dashboard
 #     secrets.yaml   docker secrets for credentials instead of .env
+#     no-auth.yaml   serve the API unauthenticated (must be stacked LAST)
 #
 # Run a subset by naming services, e.g.:  docker compose up gonzalo caliban
 
 services:
+  # ── init ── fix volume ownership before anything starts ────────────────────
+  # All three images run as uid 10001 (`app`). Docker initializes a fresh named
+  # volume from the image path it is mounted over — but nothing in the caliban
+  # image owns /run/caliban, so that volume would arrive root-owned and caliband
+  # could not bind its control socket there (the error is a bare
+  # "PermissionDenied"). This one-shot service chowns the volumes first, so the
+  # result does not depend on which container happens to mount them first.
+  #
+  # It also makes CALIBAN_UID meaningful: set it to your own `id -u` when the
+  # workspace is a host bind mount, so agents can write to the checkout. Then
+  # the data volumes must belong to that uid too, which is what this does.
+  init:
+    image: ghcr.io/caliban-ai/caliban:${CALIBAN_VERSION:?set CALIBAN_VERSION in .env}
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        uid="${CALIBAN_UID:-10001}"; gid="${CALIBAN_GID:-10001}"
+        for d in /run/caliban /gonzalo-data /prospero-data; do
+          mkdir -p "$$d"
+          chown "$$uid:$$gid" "$$d"
+        done
+        chmod 0770 /run/caliban
+        echo "init: volumes owned by $$uid:$$gid"
+    volumes:
+      - caliban-runtime:/run/caliban
+      - gonzalo-data:/gonzalo-data
+      - prospero-data:/prospero-data
+    restart: "no"
+
   # ── gonzalo ── persistence / code-graph MCP server ──────────────────────────
   gonzalo:
     image: ghcr.io/caliban-ai/gonzalo:${GONZALO_VERSION:?set GONZALO_VERSION in .env}
     restart: unless-stopped
+    user: "${CALIBAN_UID:-10001}:${CALIBAN_GID:-10001}"
+    depends_on:
+      init:
+        condition: service_completed_successfully
     environment:
       GONZALO_HTTP_ADDR: 0.0.0.0:8080
       GONZALO_GRPC_ADDR: 0.0.0.0:50051
@@ -50,6 +90,7 @@ services:
   caliban:
     image: ghcr.io/caliban-ai/caliban:${CALIBAN_VERSION:?set CALIBAN_VERSION in .env}
     restart: unless-stopped
+    user: "${CALIBAN_UID:-10001}:${CALIBAN_GID:-10001}"
     # caliband is per-workspace; it derives its control socket name from the
     # --workspace-root path. prospero must see the SAME canonical path, so the
     # workspace is mounted at /workspace in both containers.
@@ -68,7 +109,10 @@ services:
       - ${CALIBAN_WORKSPACE:-./workspace}:/workspace
       - caliban-runtime:/run/caliban   # shared control-socket dir (see prospero)
     depends_on:
-      - gonzalo
+      gonzalo:
+        condition: service_started
+      init:
+        condition: service_completed_successfully
     healthcheck:
       # Ready once the daemon has bound its control socket in the runtime dir.
       test: ["CMD-SHELL", "ls /run/caliban/*.sock >/dev/null 2>&1 || exit 1"]
@@ -81,7 +125,15 @@ services:
   prospero:
     image: ghcr.io/caliban-ai/prospero:${PROSPERO_VERSION:?set PROSPERO_VERSION in .env}
     restart: unless-stopped
-    command: ["--no-autostart"]   # caliban runs as its own service above
+    user: "${CALIBAN_UID:-10001}:${CALIBAN_GID:-10001}"
+    # The auth choice rides on the command, not the environment: prosperod takes
+    # --api-tokens-file as an Option<PathBuf> (an empty env value is a bad path,
+    # not "unset") and refuses --insecure-no-auth together with a tokens file.
+    # Overlays replace this list wholesale, so each mode stays unambiguous.
+    command:
+      - "--no-autostart"            # caliban runs as its own service above
+      - "--api-tokens-file"
+      - "/run/prospero/auth/tokens"
     environment:
       PROSPERO_ADDR: 0.0.0.0:7878
       PROSPERO_DATA_DIR: /data
@@ -98,6 +150,10 @@ services:
       # prospero canonicalizes the repo root before hashing the socket name, so
       # /workspace must resolve identically here. Read-only is enough.
       - ${CALIBAN_WORKSPACE:-./workspace}:/workspace:ro
+      # API tokens (and, when clustered, the session-cookie key). The directory
+      # is committed with a .gitkeep so a clean clone mounts it rather than
+      # letting docker create it root-owned; the material inside is gitignored.
+      - ./secrets/prospero:/run/prospero/auth:ro
     depends_on:
       # caliban's healthcheck goes green once its control socket is bound, so
       # prospero starts only after there's a daemon to discover.

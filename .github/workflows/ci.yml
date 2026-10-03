@@ -20,6 +20,8 @@ jobs:
           mkdir -p workspace
           # secrets overlay references a real file at config time.
           printf '%s' 'ci-dummy-key' > secrets/anthropic_api_key
+          # prospero's tokens file is passed by the base compose.
+          ./scripts/gen-prospero-auth.sh ci admin > /dev/null
 
       - name: Validate base + every overlay combination
         run: |
@@ -30,8 +32,10 @@ jobs:
             "compose.yaml -f overlays/postgres.yaml"
             "compose.yaml -f overlays/proxy.yaml"
             "compose.yaml -f overlays/secrets.yaml"
+            "compose.yaml -f overlays/no-auth.yaml"
             "compose.yaml -f overlays/postgres.yaml -f overlays/proxy.yaml"
             "compose.yaml -f overlays/postgres.yaml -f overlays/secrets.yaml"
+            "compose.yaml -f overlays/postgres.yaml -f overlays/no-auth.yaml"
           )
           for c in "${combos[@]}"; do
             echo "::group::docker compose -f $c config"
@@ -44,3 +48,63 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck scripts/*.sh
+
+  smoke:
+    name: stack boots and enforces auth
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare env
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          mkdir -p workspace
+          git -C workspace init -q
+          git -C workspace -c user.email=ci@example.com -c user.name=ci commit -q --allow-empty -m init
+          # Run as the runner's uid so a bind-mounted workspace is writable.
+          printf 'CALIBAN_UID=%s\nCALIBAN_GID=%s\n' "$(id -u)" "$(id -g)" >> .env
+          ./scripts/gen-prospero-auth.sh ci admin | tee token.txt
+          grep -o 'pspo_[A-Za-z0-9_-]*' token.txt | head -1 > token.value
+
+      - name: Preflight
+        run: ./scripts/preflight.sh
+
+      - name: Bring the stack up
+        run: docker compose up -d --wait --wait-timeout 300
+
+      - name: Probes and auth are enforced
+        run: |
+          set -euo pipefail
+          tok="$(cat token.value)"
+          code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          [ "$(code http://localhost:7878/healthz)" = 200 ]
+          # Unauthenticated and bogus-token requests must be refused.
+          [ "$(code http://localhost:7878/api/fleet)" = 401 ]
+          [ "$(code -H 'Authorization: Bearer pspo_bogus' http://localhost:7878/api/fleet)" = 401 ]
+          [ "$(code -H "Authorization: Bearer $tok" http://localhost:7878/api/fleet)" = 200 ]
+          echo "auth enforced"
+
+      - name: prospero reaches caliband over the shared socket
+        run: |
+          set -euo pipefail
+          tok="$(cat token.value)"
+          curl -sf -X POST http://localhost:7878/api/workspaces \
+            -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' \
+            -d '{"name":"workspace","root":"/workspace"}'
+          for i in $(seq 1 20); do
+            state="$(curl -sf -H "Authorization: Bearer $tok" http://localhost:7878/api/workspaces \
+                     | python3 -c 'import json,sys; w=json.load(sys.stdin); print(w[0]["health"]["state"] if w else "none")')"
+            [ "$state" = healthy ] && { echo "workspace healthy"; exit 0; }
+            sleep 3
+          done
+          echo "workspace never became healthy (last state: ${state:-unknown})" >&2
+          exit 1
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail 80
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

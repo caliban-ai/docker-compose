@@ -15,29 +15,19 @@ persists state in named volumes. For Kubernetes, use
 [**ariel**](https://caliban-ai.github.io/ariel/), the suite's Discord chat
 bridge, is **not** part of this stack — it is only packaged as a Helm chart today.
 
-> ### ⚠️ This stack's image pins are stale and it will not start as shipped
+> ### Tested image cohort
 >
-> All three images are published on GHCR, but the versions pinned in
-> `.env.example` are from July 2026 — and **`CALIBAN_VERSION=0.4.0` was never
-> published at all** (the oldest `ghcr.io/caliban-ai/caliban` tag is `0.5.0`), so
-> `docker compose up` fails to pull.
->
-> | Var | Pinned | Published latest |
+> | Var | Pinned | Notes |
 > |---|---|---|
-> | `CALIBAN_VERSION` | `0.4.0` ✗ not a real tag | `0.15.0` |
-> | `GONZALO_VERSION` | `0.2.0` | `0.7.0` |
-> | `PROSPERO_VERSION` | `0.1.0` | `0.8.1` |
+> | `CALIBAN_VERSION` | `0.15.0` | |
+> | `GONZALO_VERSION` | `0.7.0` | cannot read a `gonzalo-data` volume written by < 0.7 |
+> | `PROSPERO_VERSION` | `0.8.1` | authenticates its API; see [API auth](#prospero-api-auth) |
 >
-> The pins move as a **cohort** — prosperod and caliband share a control-plane
-> wire contract, and gonzalo holds both their records — so revising them is one
-> tested change, not three tag bumps. The blockers are listed in `.env.example`
-> next to the pins: prospero >= 0.8.0 is breaking for deployments (it refuses a
-> non-loopback `--addr` without API tokens, and `compose.yaml` binds
-> `0.0.0.0:7878`), and gonzalo 0.7.0 changes how deletion replicates and adds
-> record kinds a 0.2 binary cannot decode.
->
-> Until that lands, use the [Helm charts](https://github.com/caliban-ai/helm-charts),
-> whose CI proves the current cohort comes up and reconciles a task.
+> These three move as a **cohort**: prosperod and caliband share a control-plane
+> wire contract (it moved into the `caliban-contract` crate in caliban 0.14.0),
+> and gonzalo holds both their records. Bump all three together and re-run
+> `./scripts/preflight.sh`, which flags a pin that is behind or was never
+> published.
 
 ## Quick start
 
@@ -45,19 +35,77 @@ bridge, is **not** part of this stack — it is only packaged as a Helm chart to
 git clone https://github.com/caliban-ai/docker-compose
 cd docker-compose
 
-cp .env.example .env          # then edit: set ANTHROPIC_API_KEY
-mkdir -p workspace            # the repo/workspace caliban will supervise
-./scripts/preflight.sh        # optional sanity check
+cp .env.example .env               # then edit: set ANTHROPIC_API_KEY
+mkdir -p workspace                 # the repo/workspace caliban will supervise
+
+./scripts/gen-prospero-auth.sh     # mint an API token — prints it once, copy it
+./scripts/preflight.sh             # checks pins, auth material and volumes
 
 docker compose up -d
-open http://localhost:7878    # prospero dashboard
+open http://localhost:7878         # sign in with the token you just copied
 ```
+
+Then register the workspace so prospero supervises it:
+
+```sh
+curl -X POST http://localhost:7878/api/workspaces \
+  -H "Authorization: Bearer $PROSPERO_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"workspace","root":"/workspace"}'
+```
+
+The released `prospero` image contains only the `prosperod` daemon, not the
+`prospero` CLI, so registration goes through the HTTP API (or the dashboard).
+`GET /api/workspaces` should then report `"state": "healthy"`, which means
+prospero reached caliband over the shared socket.
 
 The base stack runs all three services with SQLite persistence and wires
 prospero ↔ caliban over a shared Unix control socket — no TLS, no reverse proxy.
 
-(Read the version warning above first: as pinned, the `caliban` image tag does
-not exist, so this will fail at the pull.)
+### Running as your own user
+
+Every image runs as uid `10001`. If agents need to **write** to a bind-mounted
+workspace (git worktrees, edits), run the services as the user that owns it:
+
+```sh
+printf 'CALIBAN_UID=%s\nCALIBAN_GID=%s\n' "$(id -u)" "$(id -g)" >> .env
+```
+
+A one-shot `init` service chowns the named volumes to that uid before anything
+starts, so the data volumes follow the same owner. Leave these unset to keep the
+images' own uid, which is fine when nothing writes to the workspace from inside.
+
+## prospero API auth
+
+prosperod >= 0.8.0 authenticates every non-probe route, and refuses to bind a
+non-loopback address with no tokens configured — this stack binds `0.0.0.0:7878`,
+so the base `compose.yaml` passes `--api-tokens-file`.
+
+```sh
+./scripts/gen-prospero-auth.sh              # token `admin`, scope admin
+./scripts/gen-prospero-auth.sh ci read      # a second, read-only token
+```
+
+The script appends a `<name> <scope> sha256:<hex>` line to
+`secrets/prospero/tokens` and prints the token **once** — prosperod stores only
+the hash, so a lost token cannot be recovered; mint another and delete the stale
+line. It also writes `secrets/prospero/session.key`, the session-cookie key that
+clustered prosperod (the Postgres overlay) requires. Both files are gitignored;
+the directory is committed so Docker mounts it instead of creating it root-owned.
+
+Scopes are `read`, `operate` (spawn/kill/input) and `admin` (workspaces, and
+spawning unattended agents). Sign in to the dashboard with a token, or send
+`Authorization: Bearer pspo_…`. Restart prospero after editing the file —
+prosperod reads it only at startup.
+
+To serve **unauthenticated** instead, stack `overlays/no-auth.yaml` last:
+
+```sh
+docker compose -f compose.yaml -f overlays/no-auth.yaml up -d
+```
+
+Anyone who can reach the published port then controls the fleet, so keep that
+port private. prosperod logs the mode loudly on every start.
 
 ## How it fits together
 
@@ -88,11 +136,12 @@ All configuration is in `.env` (copied from `.env.example`, gitignored). Key kno
 
 | Var | Purpose | Default |
 |---|---|---|
-| `CALIBAN_VERSION` / `GONZALO_VERSION` / `PROSPERO_VERSION` | pinned image tags (**stale — see the warning above**) | see `.env.example` |
+| `CALIBAN_VERSION` / `GONZALO_VERSION` / `PROSPERO_VERSION` | pinned image tags (move them as a cohort) | `0.15.0` / `0.7.0` / `0.8.1` |
 | `ANTHROPIC_API_KEY` | caliban model credential (default provider) | — |
 | `PROSPERO_HTTP_PORT` | host port for the dashboard | `7878` |
 | `PROSPERO_HOST` | prosperod's fleet *identity* (not a backend selector) | `local` |
 | `CALIBAN_WORKSPACE` | host dir caliban supervises | `./workspace` |
+| `CALIBAN_UID` / `CALIBAN_GID` | run the services as this user (set to your own for a writable bind mount) | `10001` / `10001` |
 | `RUST_LOG` | log verbosity | `info` |
 | `POSTGRES_USER` / `_PASSWORD` / `_DB` | postgres overlay credentials | `prospero` / `change-me` / `prospero` |
 | `PROSPERO_REPLICA_ID` | postgres overlay: clustered replica identity | `prospero-1` |
@@ -101,10 +150,10 @@ All configuration is in `.env` (copied from `.env.example`, gitignored). Key kno
 
 Pin images by digest (`0.7.0@sha256:…`) for fully reproducible deploys.
 
-> **Not configured here:** prospero >= 0.8.0 needs an API-auth decision
-> (`PROSPERO_API_TOKENS_FILE`, or `PROSPERO_INSECURE_NO_AUTH=1` to opt out) before
-> it will bind `0.0.0.0`. The pinned `PROSPERO_VERSION=0.1.0` predates that, which
-> is why `compose.yaml` sets neither — any bump has to add one.
+> **gonzalo volumes:** gonzalo >= 0.7.0 cannot read a `gonzalo-data` volume
+> written by gonzalo < 0.7, and there is no in-place migration. If you somehow
+> have one, remove it (`docker compose down && docker volume rm
+> <project>_gonzalo-data`) and start fresh.
 
 ## Overlays (variants)
 
@@ -117,6 +166,20 @@ Run prospero against Postgres instead of SQLite. Set `POSTGRES_*` in `.env`.
 ```sh
 docker compose -f compose.yaml -f overlays/postgres.yaml up -d
 ```
+
+Clustered prosperod with tokens also needs a session-cookie key so replicas sign
+the same cookies; this overlay passes `--session-key-file`, and
+`scripts/gen-prospero-auth.sh` writes the key alongside the tokens file.
+
+### Unauthenticated API — `overlays/no-auth.yaml`
+
+```sh
+docker compose -f compose.yaml -f overlays/no-auth.yaml up -d
+```
+
+Replaces prospero's command to pass `--insecure-no-auth` instead of a tokens
+file (prosperod refuses both together), so **stack it last**. See
+[API auth](#prospero-api-auth) for what you are giving up.
 
 ### Reverse-proxy / HTTPS — `overlays/proxy.yaml`
 
